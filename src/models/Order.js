@@ -5,44 +5,75 @@ const orderItemSchema = new mongoose.Schema({
   product: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Product",
-    required: true,
-  },
-  productName: {
-    type: String,
-    required: true,
-  },
-  price: {
-    type: Number,
-    required: true,
+    required: true, // Now required for both simple and built box orders
   },
   quantity: {
     type: Number,
     required: true,
     default: 1,
   },
-  image: {
-    type: String,
-    required: false,
+  // Only store customization data, not product data
+  customization: {
+    boxType: {
+      type: String,
+      enum: ["White Box", "Clear Box"],
+      default: "White Box",
+    },
+    noteCard: {
+      type: String,
+      enum: ["None", "General", "Work", "Personal"],
+      default: "None",
+    },
+    personalization: {
+      to: String,
+      from: String,
+      message: String,
+      personalized: {
+        type: Boolean,
+        default: false,
+      },
+    },
   },
-  // Flattened customization fields from your payload
+});
+
+// Built Box specific schema
+const builtBoxSchema = new mongoose.Schema({
   boxType: {
     type: String,
-    enum: ["White Box", "Clear Box"],
-    default: "White Box",
+    required: true,
+    enum: ["regular", "big", "custom"],
   },
-  noteCard: {
+  boxSize: {
     type: String,
-    enum: ["None", "General", "Work", "Personal"],
-    default: "None",
+    required: true,
+    enum: ["Regular", "Big"],
   },
-  personalization: {
+  boxLimit: {
+    type: Number,
+    required: true,
+  },
+  cardDetails: {
+    cardId: String,
+    cardName: String,
     to: String,
     from: String,
     message: String,
-    personalized: {
+    leaveBlank: {
       type: Boolean,
       default: false,
     },
+    noNote: {
+      type: Boolean,
+      default: false,
+    },
+  },
+  personalization: {
+    option: {
+      type: String,
+      enum: ["yes", "no"],
+      default: "no",
+    },
+    message: String,
   },
 });
 
@@ -58,11 +89,19 @@ const orderSchema = new mongoose.Schema(
       ref: "User",
       required: false,
     },
+    orderType: {
+      type: String,
+      enum: ["simple", "built-box"],
+      default: "simple",
+    },
+    // For simple product orders
     items: [orderItemSchema],
+    // For built box orders
+    builtBox: builtBoxSchema,
     // Updated shippingAddress to accept string or object
     shippingAddress: {
-      type: mongoose.Schema.Types.Mixed, // Allows both string and object
-      required: true,
+      type: mongoose.Schema.Types.Mixed,
+      required: false,
     },
     paymentInfo: {
       paymentMethod: {
@@ -134,5 +173,6 @@ orderSchema.pre("save", async function (next) {
 orderSchema.index({ user: 1, createdAt: -1 });
 orderSchema.index({ orderNumber: 1 });
 orderSchema.index({ "paymentInfo.paymentStatus": 1 });
+orderSchema.index({ orderType: 1 });
 
 export default mongoose.model("Order", orderSchema);

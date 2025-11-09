@@ -8,6 +8,7 @@ import {
   handleWebhook,
   getAllOrders,
   getAllPayments,
+  createBuiltBoxOrder,
 } from "../controllers/orderController.js";
 import { verifyToken } from "../middleware/authMiddleware.js";
 
@@ -27,5 +28,6 @@ router.post("/create", createOrder);
 router.post("/confirm-payment", confirmPayment);
 router.get("/:id", getOrder);
 router.get("/user/orders", verifyToken(["admin"]), getUserOrders);
+router.post("/create-built-box", createBuiltBoxOrder); // Add this route
 
 export default router;

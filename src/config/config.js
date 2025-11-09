@@ -12,6 +12,7 @@ const config = {
 
   EMAIL_USER: "iarham307@gmail.com",
   EMAIL_PASS: "mwcuqqgwexskfniz",
+  // STRIPE_SECRET_KEY: "sk_live_oBK67uOTl09uTQpEn2PtXLq7",
   STRIPE_SECRET_KEY:
     "sk_test_51SLHNlEatfDTTsoS6PwqsTMdXvBX8UimPotLvQdOEUjx59YDr18qTrSXZplQ5OiQXOnuiCv0SIrAd6Ocf4qpsZyv00N1HQkULz",
 };

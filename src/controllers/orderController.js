@@ -5,24 +5,30 @@ import Product from "../models/Product.js";
 import stripe from "../config/stripe.js";
 import mongoose from "mongoose";
 
-// controllers/orderController.js
+// Get all orders with built box support
 export const getAllOrders = async (req, res) => {
   try {
-    const { page = 1, limit = 10, status, paymentStatus } = req.query;
+    const {
+      page = 1,
+      limit = 10,
+      status,
+      paymentStatus,
+      orderType,
+    } = req.query;
 
-    // Build filter object
     const filter = {};
     if (status) filter.orderStatus = status;
     if (paymentStatus) filter["paymentInfo.paymentStatus"] = paymentStatus;
+    if (orderType) filter.orderType = orderType;
 
     const orders = await Order.find(filter)
       .populate({
         path: "items.product",
-        select: "productName price category status", // Only select these fields, exclude image
+        select: "productName price category status image discount", // Include all necessary fields
       })
       .populate({
         path: "user",
-        select: "-password", // Exclude only password, include all other fields
+        select: "-password",
       })
       .sort({ createdAt: -1 })
       .limit(limit * 1)
@@ -52,6 +58,7 @@ export const createOrder = async (req, res) => {
   try {
     const {
       items,
+      builtBox,
       shippingAddress,
       paymentMethod,
       shippingMethod = "standard",
@@ -61,23 +68,32 @@ export const createOrder = async (req, res) => {
       shippingFee = 0,
       total,
       userId,
+      orderType = "simple",
     } = req.body;
 
     console.log("Received order payload:", req.body);
 
-    // Validate required fields
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Items are required and must be a non-empty array",
-      });
-    }
-
-    if (!shippingAddress) {
-      return res.status(400).json({
-        success: false,
-        message: "Shipping address is required",
-      });
+    // Validate based on order type
+    if (orderType === "simple") {
+      if (!items || !Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Items are required and must be a non-empty array for simple orders",
+        });
+      }
+    } else if (orderType === "built-box") {
+      if (
+        !builtBox ||
+        !builtBox.selectedItems ||
+        !Array.isArray(builtBox.selectedItems) ||
+        builtBox.selectedItems.length === 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Built box data with selected items is required",
+        });
+      }
     }
 
     if (!paymentMethod) {
@@ -87,48 +103,126 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    // Process items to extract customization data
-    const processedItems = items.map((item) => {
-      // Extract customization data from the item
-      const { customization, ...itemData } = item;
+    let processedItems = [];
+    let finalSubtotal = 0;
+    let orderData = {};
 
-      return {
-        ...itemData,
-        // Flatten customization into the item
-        boxType: customization?.boxType || "White Box",
-        noteCard: customization?.noteCard || "None",
-        personalization: {
-          to: customization?.personalization?.to || "",
-          from: customization?.personalization?.from || "",
-          message: customization?.personalization?.message || "",
-          personalized: customization?.personalization?.personalized || false,
-        },
+    // Process based on order type
+    if (orderType === "simple") {
+      // Validate and process simple product order items
+      for (const item of items) {
+        if (!item.product || !mongoose.Types.ObjectId.isValid(item.product)) {
+          return res.status(400).json({
+            success: false,
+            message: `Invalid product ID: ${item.product}`,
+          });
+        }
+
+        // Verify product exists
+        const product = await Product.findById(item.product);
+        if (!product) {
+          return res.status(404).json({
+            success: false,
+            message: `Product not found: ${item.product}`,
+          });
+        }
+
+        processedItems.push({
+          product: item.product,
+          quantity: item.quantity || 1,
+          customization: item.customization || {},
+        });
+      }
+
+      // Calculate subtotal from actual product prices
+      const products = await Product.find({
+        _id: { $in: processedItems.map((item) => item.product) },
+      });
+
+      finalSubtotal = processedItems.reduce((sum, item) => {
+        const product = products.find(
+          (p) => p._id.toString() === item.product.toString()
+        );
+        return sum + (product?.price || 0) * item.quantity;
+      }, 0);
+
+      orderData = {
+        orderType: "simple",
+        items: processedItems,
       };
-    });
+    } else if (orderType === "built-box") {
+      // Validate and process built box order items
+      for (const item of builtBox.selectedItems) {
+        if (!item.id || !mongoose.Types.ObjectId.isValid(item.id)) {
+          return res.status(400).json({
+            success: false,
+            message: `Invalid product ID in built box: ${item.id}`,
+          });
+        }
 
-    // Handle shipping address - can be string or object
+        // Verify product exists
+        const product = await Product.findById(item.id);
+        if (!product) {
+          return res.status(404).json({
+            success: false,
+            message: `Product not found in built box: ${item.id}`,
+          });
+        }
+
+        processedItems.push({
+          product: item.id,
+          quantity: item.quantity || 1,
+          customization: item.customization || {},
+        });
+      }
+
+      // Calculate subtotal from actual product prices
+      const products = await Product.find({
+        _id: { $in: processedItems.map((item) => item.product) },
+      });
+
+      finalSubtotal = processedItems.reduce((sum, item) => {
+        const product = products.find(
+          (p) => p._id.toString() === item.product.toString()
+        );
+        const price =
+          product?.discount > 0
+            ? product.price - (product.price * product.discount) / 100
+            : product?.price || 0;
+        return sum + price * item.quantity;
+      }, 0);
+
+      orderData = {
+        orderType: "built-box",
+        builtBox: {
+          boxType: builtBox.boxType || "custom",
+          boxSize: builtBox.boxSize,
+          boxLimit: builtBox.boxLimit || 0,
+          cardDetails: builtBox.cardDetails || {},
+          personalization: builtBox.personalization || {},
+        },
+        items: processedItems, // Store items in the main items array for built box too
+      };
+    }
+
+    // Handle shipping address
     let processedShippingAddress;
     if (typeof shippingAddress === "string") {
-      // If it's a string, store it as a simple address
       processedShippingAddress = shippingAddress;
     } else {
-      // If it's an object, use the structured format
       processedShippingAddress = {
         firstName: shippingAddress.firstName || "",
         lastName: shippingAddress.lastName || "",
         email: shippingAddress.email || "",
         phone: shippingAddress.phone || "",
-        address: shippingAddress.address || shippingAddress, // Fallback to string if address field doesn't exist
+        address: shippingAddress.address || shippingAddress,
         city: shippingAddress.city || "",
         zipCode: shippingAddress.zipCode || "",
         country: shippingAddress.country || "United States",
       };
     }
 
-    // Use provided totals or calculate them
-    const finalSubtotal =
-      subtotal ||
-      processedItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    // Calculate totals
     const finalTax = tax || finalSubtotal * 0.1;
     const finalShippingFee =
       shippingFee || (shippingMethod === "express" ? 12.99 : 3.99);
@@ -137,7 +231,7 @@ export const createOrder = async (req, res) => {
 
     // Create order
     const order = new Order({
-      items: processedItems,
+      ...orderData,
       shippingAddress: processedShippingAddress,
       shippingMethod,
       subtotal: finalSubtotal,
@@ -145,7 +239,7 @@ export const createOrder = async (req, res) => {
       shippingFee: finalShippingFee,
       discount,
       total: finalTotal,
-      user: new mongoose.Types.ObjectId(userId),
+      user: userId ? new mongoose.Types.ObjectId(userId) : undefined,
       paymentInfo: {
         paymentMethod: paymentMethod === "paypal" ? "paypal" : "card",
       },
@@ -158,10 +252,11 @@ export const createOrder = async (req, res) => {
     if (paymentMethod !== "paypal") {
       try {
         const paymentIntent = await stripe.paymentIntents.create({
-          amount: Math.round(finalTotal * 100), // Convert to cents
+          amount: Math.round(finalTotal * 100),
           currency: "usd",
           metadata: {
             orderId: order._id.toString(),
+            orderType: orderType,
           },
           automatic_payment_methods: {
             enabled: true,
@@ -183,14 +278,22 @@ export const createOrder = async (req, res) => {
         order.paymentInfo.paymentId = paymentIntent.id;
         await order.save();
 
+        // Populate the order with product details for response
+        const populatedOrder = await Order.findById(order._id).populate(
+          "items.product",
+          "productName price category status image discount"
+        );
+
         return res.json({
           success: true,
           order: {
-            _id: order._id,
-            orderNumber: order.orderNumber,
-            items: order.items,
-            total: order.total,
-            status: order.orderStatus,
+            _id: populatedOrder._id,
+            orderNumber: populatedOrder.orderNumber,
+            orderType: populatedOrder.orderType,
+            items: populatedOrder.items,
+            builtBox: populatedOrder.builtBox,
+            total: populatedOrder.total,
+            status: populatedOrder.orderStatus,
           },
           clientSecret: paymentIntent.client_secret,
           paymentIntentId: paymentIntent.id,
@@ -198,7 +301,6 @@ export const createOrder = async (req, res) => {
       } catch (stripeError) {
         console.error("Stripe error:", stripeError);
 
-        // Update order status to reflect payment creation failure
         order.paymentInfo.paymentStatus = "failed";
         await order.save();
 
@@ -210,15 +312,22 @@ export const createOrder = async (req, res) => {
       }
     }
 
-    // For PayPal payments
+    // For PayPal payments - populate order for response
+    const populatedOrder = await Order.findById(order._id).populate(
+      "items.product",
+      "productName price category status image discount"
+    );
+
     res.json({
       success: true,
       order: {
-        _id: order._id,
-        orderNumber: order.orderNumber,
-        items: order.items,
-        total: order.total,
-        status: order.orderStatus,
+        _id: populatedOrder._id,
+        orderNumber: populatedOrder.orderNumber,
+        orderType: populatedOrder.orderType,
+        items: populatedOrder.items,
+        builtBox: populatedOrder.builtBox,
+        total: populatedOrder.total,
+        status: populatedOrder.orderStatus,
       },
       message: "Order created successfully. Redirect to PayPal for payment.",
     });
@@ -227,6 +336,84 @@ export const createOrder = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to create order",
+      error: error.message,
+    });
+  }
+};
+
+// Create built box order (convenience function)
+export const createBuiltBoxOrder = async (req, res) => {
+  try {
+    const builtBoxData = req.body;
+
+    const orderPayload = {
+      ...builtBoxData,
+      orderType: "built-box",
+      builtBox: builtBoxData,
+      items: [], // Will be processed in createOrder
+    };
+
+    return createOrder({ body: orderPayload }, res);
+  } catch (error) {
+    console.error("Create built box order error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to create built box order",
+      error: error.message,
+    });
+  }
+};
+
+// Get order by ID with product population
+export const getOrder = async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id)
+      .populate({
+        path: "items.product",
+        select: "productName price category status image discount",
+      })
+      .populate("user");
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found",
+      });
+    }
+
+    res.json({
+      success: true,
+      order,
+    });
+  } catch (error) {
+    console.error("Get order error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to get order",
+      error: error.message,
+    });
+  }
+};
+
+// Get user orders with product population
+export const getUserOrders = async (req, res) => {
+  try {
+    const orders = await Order.find({ user: req.userId })
+      .populate({
+        path: "items.product",
+        select: "productName price category status image discount",
+      })
+      .sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      orders,
+    });
+  } catch (error) {
+    console.error("Get user orders error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to get orders",
       error: error.message,
     });
   }
@@ -268,7 +455,10 @@ export const confirmPayment = async (req, res) => {
           orderStatus: "confirmed",
         },
         { new: true }
-      );
+      ).populate({
+        path: "items.product",
+        select: "productName price category status image discount",
+      });
 
       if (!order) {
         return res.status(404).json({
@@ -277,16 +467,17 @@ export const confirmPayment = async (req, res) => {
         });
       }
 
-      // Update product stock if needed (if you have stock management)
+      // Update product stock for all order types
       try {
         for (const item of order.items) {
-          await Product.findByIdAndUpdate(item.product, {
-            $inc: { stock: -item.quantity },
-          });
+          if (item.product && item.product._id) {
+            await Product.findByIdAndUpdate(item.product._id, {
+              $inc: { stock: -item.quantity },
+            });
+          }
         }
       } catch (stockError) {
         console.error("Stock update error:", stockError);
-        // Don't fail the payment confirmation if stock update fails
       }
 
       return res.json({
@@ -310,57 +501,7 @@ export const confirmPayment = async (req, res) => {
     });
   }
 };
-
-// Get order by ID
-export const getOrder = async (req, res) => {
-  try {
-    const order = await Order.findById(req.params.id)
-      .populate("items.product")
-      .populate("user");
-
-    if (!order) {
-      return res.status(404).json({
-        success: false,
-        message: "Order not found",
-      });
-    }
-
-    res.json({
-      success: true,
-      order,
-    });
-  } catch (error) {
-    console.error("Get order error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to get order",
-      error: error.message,
-    });
-  }
-};
-
-// Get user orders
-export const getUserOrders = async (req, res) => {
-  try {
-    const orders = await Order.find({ user: req.userId })
-      .populate("items.product")
-      .sort({ createdAt: -1 });
-
-    res.json({
-      success: true,
-      orders,
-    });
-  } catch (error) {
-    console.error("Get user orders error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to get orders",
-      error: error.message,
-    });
-  }
-};
-
-// Webhook for Stripe events
+// Webhook for Stripe events (with built box support)
 export const handleWebhook = async (req, res) => {
   const sig = req.headers["stripe-signature"];
   let event;
@@ -447,6 +588,7 @@ const handlePaymentFailure = async (paymentIntent) => {
   }
 };
 
+// Get all payments (with built box support)
 export const getAllPayments = async (req, res) => {
   try {
     const {
@@ -459,6 +601,7 @@ export const getAllPayments = async (req, res) => {
       sortBy = "createdAt",
       sortOrder = "desc",
       search,
+      orderType,
     } = req.query;
 
     // Build filter object
@@ -506,7 +649,7 @@ export const getAllPayments = async (req, res) => {
     const payments = await Payment.find(filter)
       .populate({
         path: "order",
-        select: "orderNumber total user items",
+        select: "orderNumber total user items builtBox orderType",
         populate: {
           path: "user",
           select: "name email",
@@ -535,6 +678,7 @@ export const getAllPayments = async (req, res) => {
         ? {
             _id: payment.order._id,
             orderNumber: payment.order.orderNumber,
+            orderType: payment.order.orderType,
             total: payment.order.total,
             user: payment.order.user
               ? {
@@ -544,6 +688,7 @@ export const getAllPayments = async (req, res) => {
                 }
               : null,
             itemsCount: payment.order.items ? payment.order.items.length : 0,
+            builtBox: payment.order.builtBox,
           }
         : null,
     }));
@@ -615,6 +760,7 @@ export const getAllPayments = async (req, res) => {
         startDate,
         endDate,
         search,
+        orderType,
       },
     });
   } catch (error) {
@@ -630,6 +776,7 @@ export const getAllPayments = async (req, res) => {
 const orderController = {
   handleWebhook,
   createOrder,
+  createBuiltBoxOrder, // Add the new function
   confirmPayment,
   getOrder,
   getUserOrders,
